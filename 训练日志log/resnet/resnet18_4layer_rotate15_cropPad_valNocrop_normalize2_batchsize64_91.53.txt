@@ -1,0 +1,968 @@
+import torch.nn as nn
+import torch.nn.functional as F
+from torchvision.models.resnet import Bottleneck
+import torch
+import math
+import torch.nn.init as init
+
+class VGG(nn.Module):
+    """
+    Based on - https://github.com/kkweon/mnist-competition
+    """
+
+    def two_conv_pool(self, in_channels, f1, f2):
+        s = nn.Sequential(
+            nn.Conv2d(in_channels, f1, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(f1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(f1, f2, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(f2),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+        )
+        for m in s.children():
+            if isinstance(m, nn.Conv2d):
+                n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
+                m.weight.data.normal_(0, math.sqrt(2. / n))
+            elif isinstance(m, nn.BatchNorm2d):
+                m.weight.data.fill_(1)
+                m.bias.data.zero_()
+        return s
+
+    def three_conv_pool(self, in_channels, f1, f2, f3):
+        s = nn.Sequential(
+            nn.Conv2d(in_channels, f1, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(f1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(f1, f2, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(f2),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(f2, f3, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(f3),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+        )
+        for m in s.children():
+            if isinstance(m, nn.Conv2d):
+                n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
+                m.weight.data.normal_(0, math.sqrt(2. / n))
+            elif isinstance(m, nn.BatchNorm2d):
+                m.weight.data.fill_(1)
+                m.bias.data.zero_()
+        return s
+
+    def __init__(self, num_classes=10):
+        super(VGG, self).__init__()
+        self.l1 = self.two_conv_pool(1, 64, 64)
+        self.l2 = self.two_conv_pool(64, 128, 128)
+        self.l3 = self.three_conv_pool(128, 256, 256, 256)
+        self.l4 = self.three_conv_pool(256, 256, 256, 256)
+
+        self.classifier = nn.Sequential(
+            nn.Dropout(p=0.5),
+            nn.Linear(256, 512),
+            nn.BatchNorm1d(512),
+            nn.ReLU(inplace=True),
+            nn.Dropout(p=0.5),
+            nn.Linear(512, num_classes),
+        )
+
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
+                m.weight.data.normal_(0, math.sqrt(2. / n))
+                # m.bias.data.zero_()
+            elif isinstance(m, nn.BatchNorm2d):
+                m.weight.data.fill_(1)
+                m.bias.data.zero_()
+            elif isinstance(m, nn.Linear):
+                init.kaiming_normal_(m.weight)
+                m.bias.data.zero_()
+
+    def forward(self, x):
+        x = self.l1(x)
+        x = self.l2(x)
+        x = self.l3(x)
+        x = self.l4(x)
+        x = x.view(x.size(0), -1)
+        x = self.classifier(x)
+        return F.log_softmax(x, dim=1)
+
+
+def conv3x3(in_planes, out_planes, stride=1):
+    "3x3 convolution with padding"
+    return nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=stride,
+                     padding=1, bias=False)
+
+
+class BasicBlock(nn.Module):
+    expansion = 1
+
+    def __init__(self, inplanes, planes, stride=1, downsample=None):
+        super(BasicBlock, self).__init__()
+        self.conv1 = conv3x3(inplanes, planes, stride)
+        self.bn1 = nn.BatchNorm2d(planes)
+        self.relu = nn.ReLU(inplace=True)
+        self.conv2 = conv3x3(planes, planes)
+        self.bn2 = nn.BatchNorm2d(planes)
+        self.downsample = downsample
+        self.stride = stride
+
+    def forward(self, x):
+        residual = x
+
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
+
+        out = self.conv2(out)
+        out = self.bn2(out)
+
+        if self.downsample is not None:
+            residual = self.downsample(x)
+
+        out += residual
+        out = self.relu(out)
+
+        return out
+
+
+class Bottleneck(nn.Module):
+    expansion = 4
+
+    def __init__(self, inplanes, planes, stride=1, downsample=None):
+        super(Bottleneck, self).__init__()
+        self.conv1 = nn.Conv2d(inplanes, planes, kernel_size=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(planes)
+        self.conv2 = nn.Conv2d(planes, planes, kernel_size=3, stride=stride,
+                               padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(planes)
+        self.conv3 = nn.Conv2d(planes, planes * 4, kernel_size=1, bias=False)
+        self.bn3 = nn.BatchNorm2d(planes * 4)
+        self.relu = nn.ReLU(inplace=True)
+        self.downsample = downsample
+        self.stride = stride
+
+    def forward(self, x):
+        residual = x
+
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
+
+        out = self.conv2(out)
+        out = self.bn2(out)
+        out = self.relu(out)
+
+        out = self.conv3(out)
+        out = self.bn3(out)
+
+        if self.downsample is not None:
+            residual = self.downsample(x)
+
+        out += residual
+        out = self.relu(out)
+
+        return out
+
+
+class ResNet(nn.Module):
+
+    def __init__(self, block, layers, num_classes=10):
+        self.inplanes = 64
+        super(ResNet, self).__init__()
+        self.conv1 = nn.Conv2d(1, 64, kernel_size=3, stride=1, padding=1,
+                               bias=False)
+        self.bn1 = nn.BatchNorm2d(64)
+        self.relu = nn.ReLU(inplace=True)
+        # self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+        self.layer1 = self._make_layer(block, 64, layers[0])
+        self.layer2 = self._make_layer(block, 128, layers[1], stride=2)
+        self.layer3 = self._make_layer(block, 256, layers[2], stride=2)
+        self.layer4 = self._make_layer(block, 512, layers[3], stride=2)
+        self.avgpool = nn.AvgPool2d(4)
+        self.fc = nn.Linear(512 * block.expansion, num_classes)
+        '''self.fc = nn.Sequential(
+                     nn.Linear(256 * block.expansion, 1024),
+                     nn.BatchNorm1d(1024),
+                     nn.Linear(1024, num_classes)
+                     )'''
+
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
+                m.weight.data.normal_(0, math.sqrt(2. / n))
+            elif isinstance(m, nn.BatchNorm2d):
+                m.weight.data.fill_(1)
+                m.bias.data.zero_()
+
+    def _make_layer(self, block, planes, blocks, stride=1):
+        downsample = None
+        if stride != 1 or self.inplanes != planes * block.expansion:
+            downsample = nn.Sequential(
+                nn.Conv2d(self.inplanes, planes * block.expansion,
+                          kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm2d(planes * block.expansion),
+            )
+
+        layers = []
+        layers.append(block(self.inplanes, planes, stride, downsample))
+        self.inplanes = planes * block.expansion
+        for i in range(1, blocks):
+            layers.append(block(self.inplanes, planes))
+
+        return nn.Sequential(*layers)
+
+    def forward(self, x):
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        # x = self.maxpool(x)
+
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
+
+        x = self.avgpool(x)
+        x = x.view(x.size(0), -1)
+        x = self.fc(x)
+
+        return x
+
+
+def resnet18(pretrained=False, **kwargs):
+    """Constructs a ResNet-18 model.
+    Args:
+        pretrained (bool): If True, returns a model pre-trained on ImageNet
+    """
+    model = ResNet(BasicBlock, [2, 2, 2, 2], **kwargs)
+    if pretrained:
+        model.load_state_dict(model_zoo.load_url(model_urls['resnet18']))
+    return model
+
+
+
+
+
+
+
+
+
+split train val random seed:8427
+RANDOM SEED: 8427
+data catagory: train
+len of img: 27000
+data catagory: val
+len of img: 3000
+data catagory: test
+len of img: 5000
+using device: cuda
+~fc: conv1.weight
+~fc: bn1.weight
+~fc: bn1.bias
+~fc: layer1.0.conv1.weight
+~fc: layer1.0.bn1.weight
+~fc: layer1.0.bn1.bias
+~fc: layer1.0.conv2.weight
+~fc: layer1.0.bn2.weight
+~fc: layer1.0.bn2.bias
+~fc: layer1.1.conv1.weight
+~fc: layer1.1.bn1.weight
+~fc: layer1.1.bn1.bias
+~fc: layer1.1.conv2.weight
+~fc: layer1.1.bn2.weight
+~fc: layer1.1.bn2.bias
+~fc: layer2.0.conv1.weight
+~fc: layer2.0.bn1.weight
+~fc: layer2.0.bn1.bias
+~fc: layer2.0.conv2.weight
+~fc: layer2.0.bn2.weight
+~fc: layer2.0.bn2.bias
+~fc: layer2.0.downsample.0.weight
+~fc: layer2.0.downsample.1.weight
+~fc: layer2.0.downsample.1.bias
+~fc: layer2.1.conv1.weight
+~fc: layer2.1.bn1.weight
+~fc: layer2.1.bn1.bias
+~fc: layer2.1.conv2.weight
+~fc: layer2.1.bn2.weight
+~fc: layer2.1.bn2.bias
+~fc: layer3.0.conv1.weight
+~fc: layer3.0.bn1.weight
+~fc: layer3.0.bn1.bias
+~fc: layer3.0.conv2.weight
+~fc: layer3.0.bn2.weight
+~fc: layer3.0.bn2.bias
+~fc: layer3.0.downsample.0.weight
+~fc: layer3.0.downsample.1.weight
+~fc: layer3.0.downsample.1.bias
+~fc: layer3.1.conv1.weight
+~fc: layer3.1.bn1.weight
+~fc: layer3.1.bn1.bias
+~fc: layer3.1.conv2.weight
+~fc: layer3.1.bn2.weight
+~fc: layer3.1.bn2.bias
+~fc: layer4.0.conv1.weight
+~fc: layer4.0.bn1.weight
+~fc: layer4.0.bn1.bias
+~fc: layer4.0.conv2.weight
+~fc: layer4.0.bn2.weight
+~fc: layer4.0.bn2.bias
+~fc: layer4.0.downsample.0.weight
+~fc: layer4.0.downsample.1.weight
+~fc: layer4.0.downsample.1.bias
+~fc: layer4.1.conv1.weight
+~fc: layer4.1.bn1.weight
+~fc: layer4.1.bn1.bias
+~fc: layer4.1.conv2.weight
+~fc: layer4.1.bn2.weight
+~fc: layer4.1.bn2.bias
+ fc: fc.weight
+ fc: fc.bias
+fc learning rate: 0.001
+not fc learning rate: 0.001
+ResNet(
+  (conv1): Conv2d(1, 64, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+  (bn1): BatchNorm2d(64, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+  (relu): ReLU(inplace=True)
+  (layer1): Sequential(
+    (0): BasicBlock(
+      (conv1): Conv2d(64, 64, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+      (bn1): BatchNorm2d(64, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+      (relu): ReLU(inplace=True)
+      (conv2): Conv2d(64, 64, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+      (bn2): BatchNorm2d(64, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+    )
+    (1): BasicBlock(
+      (conv1): Conv2d(64, 64, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+      (bn1): BatchNorm2d(64, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+      (relu): ReLU(inplace=True)
+      (conv2): Conv2d(64, 64, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+      (bn2): BatchNorm2d(64, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+    )
+  )
+  (layer2): Sequential(
+    (0): BasicBlock(
+      (conv1): Conv2d(64, 128, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1), bias=False)
+      (bn1): BatchNorm2d(128, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+      (relu): ReLU(inplace=True)
+      (conv2): Conv2d(128, 128, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+      (bn2): BatchNorm2d(128, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+      (downsample): Sequential(
+        (0): Conv2d(64, 128, kernel_size=(1, 1), stride=(2, 2), bias=False)
+        (1): BatchNorm2d(128, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+      )
+    )
+    (1): BasicBlock(
+      (conv1): Conv2d(128, 128, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+      (bn1): BatchNorm2d(128, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+      (relu): ReLU(inplace=True)
+      (conv2): Conv2d(128, 128, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+      (bn2): BatchNorm2d(128, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+    )
+  )
+  (layer3): Sequential(
+    (0): BasicBlock(
+      (conv1): Conv2d(128, 256, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1), bias=False)
+      (bn1): BatchNorm2d(256, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+      (relu): ReLU(inplace=True)
+      (conv2): Conv2d(256, 256, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+      (bn2): BatchNorm2d(256, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+      (downsample): Sequential(
+        (0): Conv2d(128, 256, kernel_size=(1, 1), stride=(2, 2), bias=False)
+        (1): BatchNorm2d(256, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+      )
+    )
+    (1): BasicBlock(
+      (conv1): Conv2d(256, 256, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+      (bn1): BatchNorm2d(256, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+      (relu): ReLU(inplace=True)
+      (conv2): Conv2d(256, 256, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+      (bn2): BatchNorm2d(256, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+    )
+  )
+  (layer4): Sequential(
+    (0): BasicBlock(
+      (conv1): Conv2d(256, 512, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1), bias=False)
+      (bn1): BatchNorm2d(512, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+      (relu): ReLU(inplace=True)
+      (conv2): Conv2d(512, 512, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+      (bn2): BatchNorm2d(512, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+      (downsample): Sequential(
+        (0): Conv2d(256, 512, kernel_size=(1, 1), stride=(2, 2), bias=False)
+        (1): BatchNorm2d(512, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+      )
+    )
+    (1): BasicBlock(
+      (conv1): Conv2d(512, 512, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+      (bn1): BatchNorm2d(512, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+      (relu): ReLU(inplace=True)
+      (conv2): Conv2d(512, 512, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+      (bn2): BatchNorm2d(512, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)
+    )
+  )
+  (avgpool): AvgPool2d(kernel_size=4, stride=4, padding=0)
+  (fc): Linear(in_features=512, out_features=10, bias=True)
+)
+epoch: 0
+Train: [0/422]	Time 4.542 (4.542)	Loss 2.5281 (2.5281)	Prec@1 4.688 (4.688)	Prec@5 37.500 (37.500)
+Train: [50/422]	Time 0.028 (0.120)	Loss 1.0090 (1.1976)	Prec@1 60.938 (54.963)	Prec@5 98.438 (95.404)
+Train: [100/422]	Time 0.030 (0.030)	Loss 0.8099 (1.0336)	Prec@1 68.750 (60.688)	Prec@5 100.000 (97.656)
+Train: [150/422]	Time 0.031 (0.030)	Loss 0.6268 (0.8365)	Prec@1 81.250 (68.922)	Prec@5 100.000 (98.844)
+Train: [200/422]	Time 0.028 (0.030)	Loss 0.8551 (0.7634)	Prec@1 64.062 (71.906)	Prec@5 98.438 (98.984)
+Train: [250/422]	Time 0.027 (0.029)	Loss 0.8261 (0.7399)	Prec@1 68.750 (72.312)	Prec@5 100.000 (99.188)
+Train: [300/422]	Time 0.028 (0.030)	Loss 0.8779 (0.6891)	Prec@1 70.312 (74.141)	Prec@5 95.312 (99.406)
+Train: [350/422]	Time 0.027 (0.030)	Loss 0.7802 (0.6963)	Prec@1 67.188 (73.172)	Prec@5 100.000 (99.328)
+Train: [400/422]	Time 0.027 (0.028)	Loss 0.5542 (0.6808)	Prec@1 82.812 (74.281)	Prec@5 98.438 (99.266)
+Test: [0/47]	Time 0.344 (0.344)	Loss 0.5900 (0.5900)	Prec@1 76.562 (76.562)	Prec@5 100.000 (100.000)
+Test: [20/47]	Time 0.008 (0.097)	Loss 0.7096 (0.6153)	Prec@1 67.188 (75.967)	Prec@5 100.000 (99.628)
+Test: [40/47]	Time 0.008 (0.054)	Loss 0.5039 (0.6230)	Prec@1 84.375 (75.877)	Prec@5 100.000 (99.657)
+Test: [0/40] Acc 76.033
+epoch: 1
+Train: [0/422]	Time 0.344 (0.344)	Loss 0.4980 (0.4980)	Prec@1 78.125 (78.125)	Prec@5 100.000 (100.000)
+Train: [50/422]	Time 0.026 (0.033)	Loss 0.4683 (0.6098)	Prec@1 78.125 (76.777)	Prec@5 100.000 (99.295)
+Train: [100/422]	Time 0.035 (0.027)	Loss 0.6216 (0.6161)	Prec@1 76.562 (76.609)	Prec@5 100.000 (99.328)
+Train: [150/422]	Time 0.028 (0.028)	Loss 0.3173 (0.5934)	Prec@1 85.938 (77.625)	Prec@5 100.000 (99.531)
+Train: [200/422]	Time 0.030 (0.031)	Loss 0.5715 (0.5712)	Prec@1 79.688 (78.984)	Prec@5 100.000 (99.562)
+Train: [250/422]	Time 0.035 (0.033)	Loss 0.4505 (0.5787)	Prec@1 87.500 (78.562)	Prec@5 100.000 (99.547)
+Train: [300/422]	Time 0.030 (0.033)	Loss 0.5789 (0.5806)	Prec@1 79.688 (77.953)	Prec@5 100.000 (99.625)
+Train: [350/422]	Time 0.027 (0.030)	Loss 0.6339 (0.5699)	Prec@1 73.438 (78.391)	Prec@5 98.438 (99.578)
+Train: [400/422]	Time 0.028 (0.028)	Loss 0.6771 (0.5499)	Prec@1 73.438 (79.141)	Prec@5 100.000 (99.484)
+Test: [0/47]	Time 0.343 (0.343)	Loss 0.5351 (0.5351)	Prec@1 81.250 (81.250)	Prec@5 98.438 (98.438)
+Test: [20/47]	Time 0.008 (0.024)	Loss 0.4699 (0.4255)	Prec@1 85.938 (84.226)	Prec@5 100.000 (99.777)
+Test: [40/47]	Time 0.008 (0.016)	Loss 0.3379 (0.4435)	Prec@1 84.375 (83.155)	Prec@5 100.000 (99.809)
+Test: [1/40] Acc 83.433
+epoch: 2
+Train: [0/422]	Time 0.379 (0.379)	Loss 0.4895 (0.4895)	Prec@1 85.938 (85.938)	Prec@5 100.000 (100.000)
+Train: [50/422]	Time 0.029 (0.035)	Loss 0.3770 (0.5060)	Prec@1 85.938 (80.392)	Prec@5 100.000 (99.602)
+Train: [100/422]	Time 0.031 (0.031)	Loss 0.5515 (0.5118)	Prec@1 81.250 (80.562)	Prec@5 100.000 (99.531)
+Train: [150/422]	Time 0.029 (0.033)	Loss 0.6084 (0.5141)	Prec@1 76.562 (81.141)	Prec@5 100.000 (99.562)
+Train: [200/422]	Time 0.028 (0.034)	Loss 0.5239 (0.4986)	Prec@1 81.250 (81.750)	Prec@5 100.000 (99.703)
+Train: [250/422]	Time 0.028 (0.034)	Loss 0.6600 (0.4865)	Prec@1 71.875 (81.875)	Prec@5 100.000 (99.625)
+Train: [300/422]	Time 0.030 (0.033)	Loss 0.5908 (0.5086)	Prec@1 85.938 (81.188)	Prec@5 98.438 (99.516)
+Train: [350/422]	Time 0.042 (0.034)	Loss 0.3861 (0.5081)	Prec@1 82.812 (80.969)	Prec@5 100.000 (99.641)
+Train: [400/422]	Time 0.027 (0.031)	Loss 0.5715 (0.4807)	Prec@1 82.812 (81.734)	Prec@5 100.000 (99.688)
+Test: [0/47]	Time 0.339 (0.339)	Loss 0.4130 (0.4130)	Prec@1 85.938 (85.938)	Prec@5 100.000 (100.000)
+Test: [20/47]	Time 0.008 (0.024)	Loss 0.4182 (0.4185)	Prec@1 90.625 (85.193)	Prec@5 100.000 (99.554)
+Test: [40/47]	Time 0.010 (0.017)	Loss 0.3128 (0.4249)	Prec@1 90.625 (85.175)	Prec@5 100.000 (99.733)
+Test: [2/40] Acc 85.300
+epoch: 3
+Train: [0/422]	Time 0.348 (0.348)	Loss 0.3680 (0.3680)	Prec@1 90.625 (90.625)	Prec@5 98.438 (98.438)
+Train: [50/422]	Time 0.027 (0.033)	Loss 0.4457 (0.4658)	Prec@1 82.812 (82.751)	Prec@5 100.000 (99.663)
+Train: [100/422]	Time 0.032 (0.029)	Loss 0.4670 (0.4718)	Prec@1 79.688 (82.062)	Prec@5 100.000 (99.688)
+Train: [150/422]	Time 0.031 (0.031)	Loss 0.5532 (0.4625)	Prec@1 78.125 (82.062)	Prec@5 96.875 (99.547)
+Train: [200/422]	Time 0.028 (0.031)	Loss 0.6178 (0.4596)	Prec@1 75.000 (82.484)	Prec@5 100.000 (99.609)
+Train: [250/422]	Time 0.027 (0.030)	Loss 0.4921 (0.4556)	Prec@1 78.125 (82.703)	Prec@5 100.000 (99.750)
+Train: [300/422]	Time 0.027 (0.028)	Loss 0.4082 (0.4580)	Prec@1 81.250 (82.969)	Prec@5 100.000 (99.641)
+Train: [350/422]	Time 0.027 (0.027)	Loss 0.3611 (0.4566)	Prec@1 87.500 (83.141)	Prec@5 100.000 (99.672)
+Train: [400/422]	Time 0.027 (0.027)	Loss 0.5094 (0.4384)	Prec@1 78.125 (83.531)	Prec@5 100.000 (99.703)
+Test: [0/47]	Time 0.315 (0.315)	Loss 0.4707 (0.4707)	Prec@1 84.375 (84.375)	Prec@5 100.000 (100.000)
+Test: [20/47]	Time 0.008 (0.024)	Loss 0.4376 (0.4018)	Prec@1 79.688 (85.193)	Prec@5 100.000 (99.777)
+Test: [40/47]	Time 0.008 (0.016)	Loss 0.2873 (0.4135)	Prec@1 89.062 (85.442)	Prec@5 100.000 (99.848)
+Test: [3/40] Acc 85.433
+epoch: 4
+Train: [0/422]	Time 0.327 (0.327)	Loss 0.5869 (0.5869)	Prec@1 81.250 (81.250)	Prec@5 98.438 (98.438)
+Train: [50/422]	Time 0.027 (0.032)	Loss 0.5312 (0.4329)	Prec@1 82.812 (84.712)	Prec@5 98.438 (99.449)
+Train: [100/422]	Time 0.026 (0.026)	Loss 0.3460 (0.4290)	Prec@1 89.062 (84.109)	Prec@5 100.000 (99.547)
+Train: [150/422]	Time 0.026 (0.026)	Loss 0.4873 (0.4170)	Prec@1 81.250 (84.328)	Prec@5 100.000 (99.672)
+Train: [200/422]	Time 0.027 (0.026)	Loss 0.3525 (0.4189)	Prec@1 85.938 (84.516)	Prec@5 100.000 (99.719)
+Train: [250/422]	Time 0.027 (0.027)	Loss 0.5477 (0.4311)	Prec@1 82.812 (83.844)	Prec@5 96.875 (99.719)
+Train: [300/422]	Time 0.027 (0.027)	Loss 0.5159 (0.4248)	Prec@1 81.250 (84.078)	Prec@5 100.000 (99.719)
+Train: [350/422]	Time 0.026 (0.027)	Loss 0.3762 (0.4175)	Prec@1 84.375 (84.641)	Prec@5 100.000 (99.734)
+Train: [400/422]	Time 0.027 (0.027)	Loss 0.2695 (0.4133)	Prec@1 92.188 (84.734)	Prec@5 100.000 (99.781)
+Test: [0/47]	Time 0.315 (0.315)	Loss 0.3442 (0.3442)	Prec@1 89.062 (89.062)	Prec@5 100.000 (100.000)
+Test: [20/47]	Time 0.008 (0.023)	Loss 0.3351 (0.3455)	Prec@1 90.625 (86.607)	Prec@5 100.000 (99.851)
+Test: [40/47]	Time 0.008 (0.016)	Loss 0.3352 (0.3666)	Prec@1 84.375 (86.319)	Prec@5 100.000 (99.924)
+Test: [4/40] Acc 86.467
+epoch: 5
+Train: [0/422]	Time 0.390 (0.390)	Loss 0.3371 (0.3371)	Prec@1 89.062 (89.062)	Prec@5 100.000 (100.000)
+Train: [50/422]	Time 0.030 (0.036)	Loss 0.3416 (0.3996)	Prec@1 84.375 (84.681)	Prec@5 100.000 (99.847)
+Train: [100/422]	Time 0.028 (0.029)	Loss 0.2989 (0.3965)	Prec@1 90.625 (85.141)	Prec@5 100.000 (99.859)
+Train: [150/422]	Time 0.031 (0.030)	Loss 0.2963 (0.4013)	Prec@1 87.500 (85.172)	Prec@5 100.000 (99.812)
+Train: [200/422]	Time 0.027 (0.029)	Loss 0.2592 (0.4163)	Prec@1 89.062 (84.516)	Prec@5 100.000 (99.719)
+Train: [250/422]	Time 0.030 (0.030)	Loss 0.3731 (0.3962)	Prec@1 89.062 (85.703)	Prec@5 100.000 (99.734)
+Train: [300/422]	Time 0.038 (0.031)	Loss 0.2932 (0.3875)	Prec@1 92.188 (86.344)	Prec@5 100.000 (99.750)
+Train: [350/422]	Time 0.027 (0.030)	Loss 0.4501 (0.3901)	Prec@1 78.125 (85.875)	Prec@5 100.000 (99.781)
+Train: [400/422]	Time 0.028 (0.030)	Loss 0.4507 (0.3863)	Prec@1 81.250 (85.469)	Prec@5 100.000 (99.828)
+Test: [0/47]	Time 0.337 (0.337)	Loss 0.5372 (0.5372)	Prec@1 81.250 (81.250)	Prec@5 100.000 (100.000)
+Test: [20/47]	Time 0.008 (0.024)	Loss 0.4674 (0.4024)	Prec@1 87.500 (85.491)	Prec@5 100.000 (99.851)
+Test: [40/47]	Time 0.008 (0.016)	Loss 0.4501 (0.4273)	Prec@1 87.500 (85.175)	Prec@5 100.000 (99.771)
+Test: [5/40] Acc 85.200
+epoch: 6
+Train: [0/422]	Time 0.364 (0.364)	Loss 0.4113 (0.4113)	Prec@1 82.812 (82.812)	Prec@5 100.000 (100.000)
+Train: [50/422]	Time 0.027 (0.034)	Loss 0.6335 (0.3968)	Prec@1 82.812 (85.172)	Prec@5 98.438 (99.632)
+Train: [100/422]	Time 0.032 (0.030)	Loss 0.2043 (0.3776)	Prec@1 93.750 (86.062)	Prec@5 100.000 (99.734)
+Train: [150/422]	Time 0.028 (0.031)	Loss 0.2785 (0.3548)	Prec@1 90.625 (87.016)	Prec@5 100.000 (99.875)
+Train: [200/422]	Time 0.028 (0.029)	Loss 0.3829 (0.3684)	Prec@1 87.500 (86.484)	Prec@5 100.000 (99.781)
+Train: [250/422]	Time 0.029 (0.028)	Loss 0.6926 (0.3904)	Prec@1 78.125 (85.547)	Prec@5 100.000 (99.734)
+Train: [300/422]	Time 0.030 (0.029)	Loss 0.3876 (0.4116)	Prec@1 82.812 (84.578)	Prec@5 100.000 (99.797)
+Train: [350/422]	Time 0.031 (0.030)	Loss 0.2452 (0.4022)	Prec@1 92.188 (84.984)	Prec@5 100.000 (99.812)
+Train: [400/422]	Time 0.030 (0.030)	Loss 0.3094 (0.3842)	Prec@1 92.188 (85.688)	Prec@5 98.438 (99.844)
+Test: [0/47]	Time 0.385 (0.385)	Loss 0.3207 (0.3207)	Prec@1 85.938 (85.938)	Prec@5 100.000 (100.000)
+Test: [20/47]	Time 0.008 (0.026)	Loss 0.3301 (0.3261)	Prec@1 92.188 (88.095)	Prec@5 100.000 (100.000)
+Test: [40/47]	Time 0.009 (0.018)	Loss 0.2566 (0.3473)	Prec@1 90.625 (87.538)	Prec@5 100.000 (100.000)
+Test: [6/40] Acc 87.400
+epoch: 7
+Train: [0/422]	Time 0.358 (0.358)	Loss 0.3896 (0.3896)	Prec@1 82.812 (82.812)	Prec@5 98.438 (98.438)
+Train: [50/422]	Time 0.027 (0.034)	Loss 0.4344 (0.3647)	Prec@1 82.812 (85.815)	Prec@5 100.000 (99.908)
+Train: [100/422]	Time 0.031 (0.029)	Loss 0.1763 (0.3634)	Prec@1 95.312 (85.969)	Prec@5 100.000 (99.922)
+Train: [150/422]	Time 0.035 (0.031)	Loss 0.3398 (0.3567)	Prec@1 85.938 (86.422)	Prec@5 100.000 (99.938)
+Train: [200/422]	Time 0.028 (0.032)	Loss 0.2691 (0.3589)	Prec@1 93.750 (86.531)	Prec@5 100.000 (99.844)
+Train: [250/422]	Time 0.031 (0.031)	Loss 0.4286 (0.3673)	Prec@1 85.938 (86.109)	Prec@5 100.000 (99.797)
+Train: [300/422]	Time 0.034 (0.033)	Loss 0.4844 (0.3696)	Prec@1 81.250 (86.062)	Prec@5 96.875 (99.828)
+Train: [350/422]	Time 0.029 (0.033)	Loss 0.2655 (0.3697)	Prec@1 92.188 (86.438)	Prec@5 100.000 (99.781)
+Train: [400/422]	Time 0.028 (0.030)	Loss 0.3076 (0.3703)	Prec@1 89.062 (86.766)	Prec@5 100.000 (99.766)
+Test: [0/47]	Time 0.345 (0.345)	Loss 0.3802 (0.3802)	Prec@1 81.250 (81.250)	Prec@5 100.000 (100.000)
+Test: [20/47]	Time 0.008 (0.024)	Loss 0.3166 (0.3457)	Prec@1 92.188 (87.872)	Prec@5 100.000 (99.926)
+Test: [40/47]	Time 0.008 (0.016)	Loss 0.3752 (0.3588)	Prec@1 85.938 (87.652)	Prec@5 100.000 (99.886)
+Test: [7/40] Acc 87.467
+epoch: 8
+Train: [0/422]	Time 0.356 (0.356)	Loss 0.4408 (0.4408)	Prec@1 84.375 (84.375)	Prec@5 100.000 (100.000)
+Train: [50/422]	Time 0.028 (0.035)	Loss 0.4449 (0.3471)	Prec@1 81.250 (87.286)	Prec@5 100.000 (99.877)
+Train: [100/422]	Time 0.028 (0.029)	Loss 0.2346 (0.3499)	Prec@1 90.625 (87.172)	Prec@5 100.000 (99.875)
+Train: [150/422]	Time 0.028 (0.030)	Loss 0.5030 (0.3554)	Prec@1 76.562 (86.844)	Prec@5 100.000 (99.844)
+Train: [200/422]	Time 0.035 (0.031)	Loss 0.3138 (0.3474)	Prec@1 89.062 (87.016)	Prec@5 100.000 (99.844)
+Train: [250/422]	Time 0.033 (0.032)	Loss 0.4235 (0.3508)	Prec@1 82.812 (86.812)	Prec@5 100.000 (99.828)
+Train: [300/422]	Time 0.031 (0.031)	Loss 0.3710 (0.3504)	Prec@1 84.375 (86.938)	Prec@5 100.000 (99.781)
+Train: [350/422]	Time 0.029 (0.030)	Loss 0.4732 (0.3439)	Prec@1 81.250 (87.312)	Prec@5 100.000 (99.844)
+Train: [400/422]	Time 0.029 (0.030)	Loss 0.4301 (0.3597)	Prec@1 82.812 (86.562)	Prec@5 100.000 (99.938)
+Test: [0/47]	Time 0.347 (0.347)	Loss 0.4204 (0.4204)	Prec@1 87.500 (87.500)	Prec@5 100.000 (100.000)
+Test: [20/47]	Time 0.008 (0.025)	Loss 0.3806 (0.3323)	Prec@1 87.500 (88.542)	Prec@5 100.000 (100.000)
+Test: [40/47]	Time 0.013 (0.017)	Loss 0.2620 (0.3586)	Prec@1 89.062 (87.843)	Prec@5 100.000 (100.000)
+Test: [8/40] Acc 87.967
+epoch: 9
+Train: [0/422]	Time 0.356 (0.356)	Loss 0.3011 (0.3011)	Prec@1 89.062 (89.062)	Prec@5 100.000 (100.000)
+Train: [50/422]	Time 0.028 (0.036)	Loss 0.4781 (0.3347)	Prec@1 82.812 (87.347)	Prec@5 100.000 (99.969)
+Train: [100/422]	Time 0.029 (0.030)	Loss 0.4698 (0.3318)	Prec@1 85.938 (87.688)	Prec@5 100.000 (99.875)
+Train: [150/422]	Time 0.028 (0.029)	Loss 0.2113 (0.3388)	Prec@1 93.750 (87.531)	Prec@5 100.000 (99.859)
+Train: [200/422]	Time 0.028 (0.030)	Loss 0.2735 (0.3558)	Prec@1 93.750 (86.703)	Prec@5 100.000 (99.938)
+Train: [250/422]	Time 0.031 (0.031)	Loss 0.2729 (0.3594)	Prec@1 87.500 (86.688)	Prec@5 100.000 (99.906)
+Train: [300/422]	Time 0.033 (0.030)	Loss 0.2717 (0.3506)	Prec@1 87.500 (87.141)	Prec@5 100.000 (99.828)
+Train: [350/422]	Time 0.031 (0.030)	Loss 0.2637 (0.3372)	Prec@1 89.062 (87.469)	Prec@5 100.000 (99.828)
+Train: [400/422]	Time 0.032 (0.031)	Loss 0.5909 (0.3464)	Prec@1 81.250 (86.875)	Prec@5 100.000 (99.859)
+Test: [0/47]	Time 0.336 (0.336)	Loss 0.3049 (0.3049)	Prec@1 85.938 (85.938)	Prec@5 100.000 (100.000)
+Test: [20/47]	Time 0.008 (0.024)	Loss 0.3462 (0.3101)	Prec@1 90.625 (88.988)	Prec@5 100.000 (99.777)
+Test: [40/47]	Time 0.008 (0.016)	Loss 0.2658 (0.3273)	Prec@1 89.062 (88.453)	Prec@5 100.000 (99.848)
+Test: [9/40] Acc 88.567
+epoch: 10
+Train: [0/422]	Time 0.366 (0.366)	Loss 0.2486 (0.2486)	Prec@1 90.625 (90.625)	Prec@5 100.000 (100.000)
+Train: [50/422]	Time 0.029 (0.036)	Loss 0.3212 (0.3298)	Prec@1 87.500 (88.082)	Prec@5 100.000 (99.939)
+Train: [100/422]	Time 0.028 (0.029)	Loss 0.2998 (0.3308)	Prec@1 89.062 (87.922)	Prec@5 100.000 (99.922)
+Train: [150/422]	Time 0.029 (0.029)	Loss 0.2329 (0.3379)	Prec@1 92.188 (87.438)	Prec@5 100.000 (99.828)
+Train: [200/422]	Time 0.032 (0.030)	Loss 0.4309 (0.3263)	Prec@1 85.938 (87.609)	Prec@5 100.000 (99.828)
+Train: [250/422]	Time 0.031 (0.030)	Loss 0.4514 (0.3232)	Prec@1 79.688 (87.844)	Prec@5 100.000 (99.875)
+Train: [300/422]	Time 0.029 (0.030)	Loss 0.4941 (0.3483)	Prec@1 84.375 (86.938)	Prec@5 100.000 (99.812)
+Train: [350/422]	Time 0.029 (0.029)	Loss 0.4792 (0.3361)	Prec@1 82.812 (87.234)	Prec@5 100.000 (99.844)
+Train: [400/422]	Time 0.029 (0.029)	Loss 0.2083 (0.3145)	Prec@1 89.062 (88.250)	Prec@5 100.000 (99.922)
+Test: [0/47]	Time 0.351 (0.351)	Loss 0.4144 (0.4144)	Prec@1 79.688 (79.688)	Prec@5 100.000 (100.000)
+Test: [20/47]	Time 0.012 (0.026)	Loss 0.3367 (0.3662)	Prec@1 93.750 (87.054)	Prec@5 100.000 (99.926)
+Test: [40/47]	Time 0.008 (0.017)	Loss 0.2437 (0.3787)	Prec@1 90.625 (86.433)	Prec@5 100.000 (99.962)
+Test: [10/40] Acc 86.500
+epoch: 11
+Train: [0/422]	Time 0.394 (0.394)	Loss 0.1684 (0.1684)	Prec@1 93.750 (93.750)	Prec@5 100.000 (100.000)
+Train: [50/422]	Time 0.030 (0.038)	Loss 0.3037 (0.3151)	Prec@1 87.500 (88.480)	Prec@5 98.438 (99.908)
+Train: [100/422]	Time 0.028 (0.030)	Loss 0.2759 (0.3148)	Prec@1 87.500 (88.500)	Prec@5 100.000 (99.859)
+Train: [150/422]	Time 0.028 (0.029)	Loss 0.2765 (0.3138)	Prec@1 90.625 (88.516)	Prec@5 100.000 (99.859)
+Train: [200/422]	Time 0.030 (0.029)	Loss 0.1250 (0.3146)	Prec@1 96.875 (88.062)	Prec@5 100.000 (99.938)
+Train: [250/422]	Time 0.028 (0.029)	Loss 0.4462 (0.3272)	Prec@1 84.375 (87.375)	Prec@5 100.000 (99.844)
+Train: [300/422]	Time 0.029 (0.030)	Loss 0.3677 (0.3297)	Prec@1 85.938 (87.438)	Prec@5 100.000 (99.844)
+Train: [350/422]	Time 0.034 (0.033)	Loss 0.1881 (0.3181)	Prec@1 93.750 (88.062)	Prec@5 100.000 (99.953)
+Train: [400/422]	Time 0.029 (0.032)	Loss 0.4422 (0.3122)	Prec@1 85.938 (88.359)	Prec@5 100.000 (99.922)
+Test: [0/47]	Time 0.339 (0.339)	Loss 0.3227 (0.3227)	Prec@1 90.625 (90.625)	Prec@5 100.000 (100.000)
+Test: [20/47]	Time 0.008 (0.024)	Loss 0.3003 (0.3056)	Prec@1 87.500 (88.170)	Prec@5 100.000 (99.926)
+Test: [40/47]	Time 0.008 (0.016)	Loss 0.2496 (0.3202)	Prec@1 90.625 (87.919)	Prec@5 100.000 (99.962)
+Test: [11/40] Acc 88.033
+epoch: 12
+Train: [0/422]	Time 0.357 (0.357)	Loss 0.2481 (0.2481)	Prec@1 87.500 (87.500)	Prec@5 100.000 (100.000)
+Train: [50/422]	Time 0.028 (0.034)	Loss 0.3020 (0.3022)	Prec@1 85.938 (88.787)	Prec@5 100.000 (99.908)
+Train: [100/422]	Time 0.030 (0.029)	Loss 0.3731 (0.2938)	Prec@1 89.062 (88.812)	Prec@5 100.000 (99.938)
+Train: [150/422]	Time 0.038 (0.031)	Loss 0.2947 (0.3006)	Prec@1 89.062 (88.375)	Prec@5 100.000 (99.922)
+Train: [200/422]	Time 0.029 (0.031)	Loss 0.3470 (0.3146)	Prec@1 84.375 (87.812)	Prec@5 100.000 (99.875)
+Train: [250/422]	Time 0.029 (0.030)	Loss 0.3456 (0.3160)	Prec@1 89.062 (87.938)	Prec@5 100.000 (99.922)
+Train: [300/422]	Time 0.029 (0.029)	Loss 0.3125 (0.3179)	Prec@1 89.062 (88.281)	Prec@5 100.000 (99.906)
+Train: [350/422]	Time 0.029 (0.030)	Loss 0.2262 (0.3183)	Prec@1 89.062 (88.203)	Prec@5 100.000 (99.875)
+Train: [400/422]	Time 0.035 (0.031)	Loss 0.3998 (0.3179)	Prec@1 85.938 (87.969)	Prec@5 100.000 (99.891)
+Test: [0/47]	Time 0.350 (0.350)	Loss 0.3610 (0.3610)	Prec@1 87.500 (87.500)	Prec@5 100.000 (100.000)
+Test: [20/47]	Time 0.008 (0.024)	Loss 0.3546 (0.2958)	Prec@1 92.188 (89.807)	Prec@5 100.000 (99.926)
+Test: [40/47]	Time 0.008 (0.016)	Loss 0.1566 (0.3094)	Prec@1 92.188 (89.177)	Prec@5 100.000 (99.886)
+Test: [12/40] Acc 89.333
+epoch: 13
+Train: [0/422]	Time 0.459 (0.459)	Loss 0.3938 (0.3938)	Prec@1 82.812 (82.812)	Prec@5 100.000 (100.000)
+Train: [50/422]	Time 0.027 (0.040)	Loss 0.2740 (0.3124)	Prec@1 90.625 (87.745)	Prec@5 100.000 (99.908)
+Train: [100/422]	Time 0.037 (0.031)	Loss 0.3719 (0.3035)	Prec@1 85.938 (88.469)	Prec@5 98.438 (99.891)
+Train: [150/422]	Time 0.030 (0.032)	Loss 0.3835 (0.2993)	Prec@1 89.062 (88.812)	Prec@5 100.000 (99.906)
+Train: [200/422]	Time 0.028 (0.031)	Loss 0.2596 (0.3110)	Prec@1 93.750 (88.297)	Prec@5 100.000 (99.906)
+Train: [250/422]	Time 0.031 (0.030)	Loss 0.4609 (0.3145)	Prec@1 79.688 (88.594)	Prec@5 100.000 (99.891)
+Train: [300/422]	Time 0.032 (0.030)	Loss 0.3908 (0.3033)	Prec@1 84.375 (88.781)	Prec@5 100.000 (99.906)
+Train: [350/422]	Time 0.030 (0.028)	Loss 0.3017 (0.2979)	Prec@1 87.500 (88.594)	Prec@5 100.000 (99.922)
+Train: [400/422]	Time 0.028 (0.028)	Loss 0.4118 (0.3140)	Prec@1 84.375 (88.359)	Prec@5 100.000 (99.891)
+Test: [0/47]	Time 0.350 (0.350)	Loss 0.4067 (0.4067)	Prec@1 85.938 (85.938)	Prec@5 100.000 (100.000)
+Test: [20/47]	Time 0.008 (0.025)	Loss 0.2814 (0.2950)	Prec@1 89.062 (88.914)	Prec@5 100.000 (99.851)
+Test: [40/47]	Time 0.008 (0.017)	Loss 0.1723 (0.3120)	Prec@1 95.312 (88.834)	Prec@5 100.000 (99.886)
+Test: [13/40] Acc 88.833
+epoch: 14
+Train: [0/422]	Time 0.403 (0.403)	Loss 0.3705 (0.3705)	Prec@1 82.812 (82.812)	Prec@5 100.000 (100.000)
+Train: [50/422]	Time 0.030 (0.040)	Loss 0.2990 (0.2942)	Prec@1 89.062 (89.062)	Prec@5 100.000 (99.969)
+Train: [100/422]	Time 0.028 (0.031)	Loss 0.2230 (0.2946)	Prec@1 90.625 (88.922)	Prec@5 100.000 (99.938)
+Train: [150/422]	Time 0.028 (0.029)	Loss 0.4738 (0.2978)	Prec@1 82.812 (88.625)	Prec@5 100.000 (99.906)
+Train: [200/422]	Time 0.028 (0.029)	Loss 0.3121 (0.2983)	Prec@1 90.625 (88.719)	Prec@5 100.000 (99.922)
+Train: [250/422]	Time 0.029 (0.029)	Loss 0.2289 (0.3039)	Prec@1 92.188 (88.344)	Prec@5 100.000 (99.953)
+Train: [300/422]	Time 0.033 (0.030)	Loss 0.3897 (0.3053)	Prec@1 85.938 (88.125)	Prec@5 100.000 (99.938)
+Train: [350/422]	Time 0.029 (0.031)	Loss 0.2813 (0.2966)	Prec@1 90.625 (88.484)	Prec@5 100.000 (99.938)
+Train: [400/422]	Time 0.032 (0.032)	Loss 0.3070 (0.2966)	Prec@1 89.062 (88.516)	Prec@5 100.000 (99.969)
+Test: [0/47]	Time 0.358 (0.358)	Loss 0.2520 (0.2520)	Prec@1 84.375 (84.375)	Prec@5 100.000 (100.000)
+Test: [20/47]	Time 0.008 (0.025)	Loss 0.3351 (0.2823)	Prec@1 90.625 (89.360)	Prec@5 100.000 (99.851)
+Test: [40/47]	Time 0.009 (0.017)	Loss 0.2061 (0.2976)	Prec@1 90.625 (89.520)	Prec@5 100.000 (99.924)
+Test: [14/40] Acc 89.400
+epoch: 15
+Train: [0/422]	Time 0.444 (0.444)	Loss 0.3574 (0.3574)	Prec@1 87.500 (87.500)	Prec@5 100.000 (100.000)
+Train: [50/422]	Time 0.036 (0.039)	Loss 0.2905 (0.2835)	Prec@1 89.062 (89.124)	Prec@5 100.000 (99.939)
+Train: [100/422]	Time 0.028 (0.031)	Loss 0.1919 (0.2809)	Prec@1 92.188 (89.219)	Prec@5 100.000 (99.938)
+Train: [150/422]	Time 0.028 (0.030)	Loss 0.2305 (0.2818)	Prec@1 92.188 (89.469)	Prec@5 100.000 (99.969)
+Train: [200/422]	Time 0.028 (0.029)	Loss 0.3785 (0.2782)	Prec@1 85.938 (89.844)	Prec@5 100.000 (99.906)
+Train: [250/422]	Time 0.028 (0.030)	Loss 0.2583 (0.2886)	Prec@1 89.062 (89.500)	Prec@5 100.000 (99.875)
+Train: [300/422]	Time 0.031 (0.029)	Loss 0.3546 (0.2906)	Prec@1 84.375 (89.297)	Prec@5 100.000 (99.938)
+Train: [350/422]	Time 0.027 (0.029)	Loss 0.1725 (0.2887)	Prec@1 95.312 (88.984)	Prec@5 100.000 (99.906)
+Train: [400/422]	Time 0.029 (0.028)	Loss 0.4243 (0.2954)	Prec@1 85.938 (88.969)	Prec@5 100.000 (99.938)
+Test: [0/47]	Time 0.432 (0.432)	Loss 0.3620 (0.3620)	Prec@1 82.812 (82.812)	Prec@5 100.000 (100.000)
+Test: [20/47]	Time 0.008 (0.029)	Loss 0.2864 (0.2961)	Prec@1 87.500 (88.690)	Prec@5 100.000 (99.926)
+Test: [40/47]	Time 0.008 (0.019)	Loss 0.2595 (0.3096)	Prec@1 87.500 (88.834)	Prec@5 100.000 (99.886)
+Test: [15/40] Acc 88.567
+epoch: 16
+Train: [0/422]	Time 0.423 (0.423)	Loss 0.2294 (0.2294)	Prec@1 92.188 (92.188)	Prec@5 100.000 (100.000)
+Train: [50/422]	Time 0.031 (0.037)	Loss 0.2614 (0.2754)	Prec@1 92.188 (90.196)	Prec@5 100.000 (99.939)
+Train: [100/422]	Time 0.031 (0.030)	Loss 0.2530 (0.2851)	Prec@1 89.062 (89.469)	Prec@5 100.000 (99.859)
+Train: [150/422]	Time 0.030 (0.032)	Loss 0.2429 (0.2810)	Prec@1 87.500 (89.156)	Prec@5 100.000 (99.891)
+Train: [200/422]	Time 0.028 (0.031)	Loss 0.4040 (0.2696)	Prec@1 85.938 (89.734)	Prec@5 100.000 (99.969)
+Train: [250/422]	Time 0.030 (0.029)	Loss 0.3155 (0.2825)	Prec@1 78.125 (89.312)	Prec@5 100.000 (99.906)
+Train: [300/422]	Time 0.029 (0.029)	Loss 0.2221 (0.2869)	Prec@1 93.750 (89.234)	Prec@5 100.000 (99.906)
+Train: [350/422]	Time 0.033 (0.029)	Loss 0.2282 (0.2827)	Prec@1 93.750 (89.359)	Prec@5 100.000 (99.969)
+Train: [400/422]	Time 0.028 (0.030)	Loss 0.2474 (0.2832)	Prec@1 92.188 (89.234)	Prec@5 100.000 (99.969)
+Test: [0/47]	Time 0.398 (0.398)	Loss 0.3417 (0.3417)	Prec@1 84.375 (84.375)	Prec@5 100.000 (100.000)
+Test: [20/47]	Time 0.008 (0.027)	Loss 0.3779 (0.3068)	Prec@1 89.062 (88.765)	Prec@5 100.000 (99.926)
+Test: [40/47]	Time 0.008 (0.018)	Loss 0.2993 (0.3210)	Prec@1 85.938 (88.605)	Prec@5 100.000 (99.962)
+Test: [16/40] Acc 88.600
+epoch: 17
+Train: [0/422]	Time 0.438 (0.438)	Loss 0.4198 (0.4198)	Prec@1 85.938 (85.938)	Prec@5 100.000 (100.000)
+Train: [50/422]	Time 0.031 (0.038)	Loss 0.3088 (0.2575)	Prec@1 89.062 (90.717)	Prec@5 100.000 (99.877)
+Train: [100/422]	Time 0.029 (0.031)	Loss 0.2534 (0.2687)	Prec@1 89.062 (90.125)	Prec@5 100.000 (99.922)
+Train: [150/422]	Time 0.029 (0.032)	Loss 0.2993 (0.2754)	Prec@1 85.938 (89.562)	Prec@5 100.000 (99.953)
+Train: [200/422]	Time 0.031 (0.031)	Loss 0.1992 (0.2698)	Prec@1 92.188 (89.797)	Prec@5 100.000 (99.922)
+Train: [250/422]	Time 0.028 (0.029)	Loss 0.2370 (0.2722)	Prec@1 92.188 (89.984)	Prec@5 100.000 (99.906)
+Train: [300/422]	Time 0.039 (0.031)	Loss 0.2258 (0.2799)	Prec@1 89.062 (89.953)	Prec@5 100.000 (99.938)
+Train: [350/422]	Time 0.031 (0.032)	Loss 0.2555 (0.2867)	Prec@1 87.500 (89.359)	Prec@5 100.000 (99.938)
+Train: [400/422]	Time 0.031 (0.031)	Loss 0.3077 (0.2802)	Prec@1 87.500 (89.094)	Prec@5 100.000 (99.906)
+Test: [0/47]	Time 0.417 (0.417)	Loss 0.4052 (0.4052)	Prec@1 85.938 (85.938)	Prec@5 100.000 (100.000)
+Test: [20/47]	Time 0.008 (0.028)	Loss 0.3303 (0.3155)	Prec@1 85.938 (88.021)	Prec@5 100.000 (100.000)
+Test: [40/47]	Time 0.008 (0.018)	Loss 0.2269 (0.3342)	Prec@1 89.062 (87.843)	Prec@5 100.000 (99.924)
+Test: [17/40] Acc 87.867
+epoch: 18
+Train: [0/422]	Time 0.354 (0.354)	Loss 0.4159 (0.4159)	Prec@1 85.938 (85.938)	Prec@5 100.000 (100.000)
+Train: [50/422]	Time 0.029 (0.035)	Loss 0.3218 (0.2659)	Prec@1 87.500 (90.227)	Prec@5 100.000 (99.939)
+Train: [100/422]	Time 0.029 (0.029)	Loss 0.3685 (0.2669)	Prec@1 85.938 (90.062)	Prec@5 100.000 (99.953)
+Train: [150/422]	Time 0.027 (0.030)	Loss 0.1914 (0.2660)	Prec@1 93.750 (90.000)	Prec@5 100.000 (99.938)
+Train: [200/422]	Time 0.027 (0.029)	Loss 0.2126 (0.2602)	Prec@1 92.188 (90.219)	Prec@5 100.000 (99.922)
+Train: [250/422]	Time 0.029 (0.030)	Loss 0.2255 (0.2675)	Prec@1 89.062 (89.969)	Prec@5 100.000 (99.953)
+Train: [300/422]	Time 0.028 (0.030)	Loss 0.2243 (0.2715)	Prec@1 89.062 (89.734)	Prec@5 100.000 (99.953)
+Train: [350/422]	Time 0.028 (0.029)	Loss 0.4858 (0.2796)	Prec@1 85.938 (89.469)	Prec@5 100.000 (99.906)
+Train: [400/422]	Time 0.030 (0.028)	Loss 0.3192 (0.2822)	Prec@1 89.062 (89.328)	Prec@5 100.000 (99.906)
+Test: [0/47]	Time 0.384 (0.384)	Loss 0.2765 (0.2765)	Prec@1 90.625 (90.625)	Prec@5 100.000 (100.000)
+Test: [20/47]	Time 0.008 (0.026)	Loss 0.3189 (0.2607)	Prec@1 92.188 (90.848)	Prec@5 100.000 (100.000)
+Test: [40/47]	Time 0.008 (0.017)	Loss 0.2591 (0.2824)	Prec@1 87.500 (90.206)	Prec@5 100.000 (99.886)
+Test: [18/40] Acc 90.033
+epoch: 19
+Train: [0/422]	Time 0.410 (0.410)	Loss 0.1737 (0.1737)	Prec@1 93.750 (93.750)	Prec@5 100.000 (100.000)
+Train: [50/422]	Time 0.027 (0.035)	Loss 0.2556 (0.2824)	Prec@1 90.625 (89.798)	Prec@5 100.000 (99.969)
+Train: [100/422]	Time 0.029 (0.029)	Loss 0.3898 (0.2787)	Prec@1 89.062 (89.406)	Prec@5 98.438 (99.969)
+Train: [150/422]	Time 0.029 (0.029)	Loss 0.2960 (0.2642)	Prec@1 90.625 (89.547)	Prec@5 98.438 (99.938)
+Train: [200/422]	Time 0.033 (0.029)	Loss 0.2392 (0.2564)	Prec@1 92.188 (90.156)	Prec@5 100.000 (99.922)
+Train: [250/422]	Time 0.027 (0.029)	Loss 0.3363 (0.2570)	Prec@1 87.500 (90.250)	Prec@5 100.000 (99.922)
+Train: [300/422]	Time 0.030 (0.029)	Loss 0.1917 (0.2638)	Prec@1 89.062 (89.797)	Prec@5 100.000 (99.922)
+Train: [350/422]	Time 0.030 (0.029)	Loss 0.2979 (0.2696)	Prec@1 89.062 (89.656)	Prec@5 100.000 (99.938)
+Train: [400/422]	Time 0.027 (0.030)	Loss 0.3259 (0.2720)	Prec@1 85.938 (89.781)	Prec@5 100.000 (99.969)
+Test: [0/47]	Time 0.396 (0.396)	Loss 0.2521 (0.2521)	Prec@1 92.188 (92.188)	Prec@5 100.000 (100.000)
+Test: [20/47]	Time 0.008 (0.027)	Loss 0.3719 (0.2611)	Prec@1 89.062 (90.402)	Prec@5 100.000 (100.000)
+Test: [40/47]	Time 0.008 (0.018)	Loss 0.2828 (0.2876)	Prec@1 89.062 (90.015)	Prec@5 100.000 (100.000)
+Test: [19/40] Acc 90.067
+epoch: 20
+Train: [0/422]	Time 0.406 (0.406)	Loss 0.3606 (0.3606)	Prec@1 89.062 (89.062)	Prec@5 100.000 (100.000)
+Train: [50/422]	Time 0.028 (0.037)	Loss 0.1807 (0.2519)	Prec@1 92.188 (90.288)	Prec@5 100.000 (99.877)
+Train: [100/422]	Time 0.032 (0.029)	Loss 0.2049 (0.2465)	Prec@1 90.625 (90.766)	Prec@5 100.000 (99.922)
+Train: [150/422]	Time 0.030 (0.030)	Loss 0.2743 (0.2533)	Prec@1 90.625 (90.844)	Prec@5 100.000 (99.969)
+Train: [200/422]	Time 0.028 (0.030)	Loss 0.2306 (0.2568)	Prec@1 95.312 (90.516)	Prec@5 100.000 (99.953)
+Train: [250/422]	Time 0.028 (0.029)	Loss 0.1146 (0.2592)	Prec@1 96.875 (90.141)	Prec@5 100.000 (99.969)
+Train: [300/422]	Time 0.028 (0.029)	Loss 0.2568 (0.2626)	Prec@1 90.625 (89.844)	Prec@5 100.000 (100.000)
+Train: [350/422]	Time 0.034 (0.030)	Loss 0.2336 (0.2592)	Prec@1 93.750 (89.938)	Prec@5 100.000 (99.984)
+Train: [400/422]	Time 0.030 (0.029)	Loss 0.2575 (0.2523)	Prec@1 87.500 (90.516)	Prec@5 100.000 (99.953)
+Test: [0/47]	Time 0.406 (0.406)	Loss 0.3358 (0.3358)	Prec@1 87.500 (87.500)	Prec@5 100.000 (100.000)
+Test: [20/47]	Time 0.008 (0.027)	Loss 0.4015 (0.2735)	Prec@1 89.062 (90.327)	Prec@5 100.000 (99.926)
+Test: [40/47]	Time 0.040 (0.019)	Loss 0.1714 (0.3055)	Prec@1 92.188 (90.015)	Prec@5 100.000 (99.962)
+Test: [20/40] Acc 90.033
+epoch: 21
+Train: [0/422]	Time 0.435 (0.435)	Loss 0.2835 (0.2835)	Prec@1 89.062 (89.062)	Prec@5 100.000 (100.000)
+Train: [50/422]	Time 0.029 (0.036)	Loss 0.1537 (0.2554)	Prec@1 92.188 (90.472)	Prec@5 100.000 (99.969)
+Train: [100/422]	Time 0.030 (0.028)	Loss 0.1997 (0.2568)	Prec@1 90.625 (90.203)	Prec@5 100.000 (99.984)
+Train: [150/422]	Time 0.038 (0.030)	Loss 0.2972 (0.2582)	Prec@1 89.062 (90.094)	Prec@5 100.000 (99.984)
+Train: [200/422]	Time 0.028 (0.030)	Loss 0.1682 (0.2545)	Prec@1 93.750 (90.188)	Prec@5 100.000 (99.969)
+Train: [250/422]	Time 0.030 (0.030)	Loss 0.3332 (0.2550)	Prec@1 85.938 (90.219)	Prec@5 100.000 (99.969)
+Train: [300/422]	Time 0.029 (0.029)	Loss 0.2256 (0.2499)	Prec@1 89.062 (90.562)	Prec@5 100.000 (99.969)
+Train: [350/422]	Time 0.030 (0.030)	Loss 0.3197 (0.2470)	Prec@1 89.062 (90.719)	Prec@5 100.000 (99.922)
+Train: [400/422]	Time 0.028 (0.029)	Loss 0.2569 (0.2505)	Prec@1 90.625 (90.562)	Prec@5 100.000 (99.891)
+Test: [0/47]	Time 0.409 (0.409)	Loss 0.3268 (0.3268)	Prec@1 89.062 (89.062)	Prec@5 100.000 (100.000)
+Test: [20/47]	Time 0.008 (0.027)	Loss 0.2853 (0.2779)	Prec@1 93.750 (90.625)	Prec@5 100.000 (99.926)
+Test: [40/47]	Time 0.008 (0.018)	Loss 0.2242 (0.3004)	Prec@1 89.062 (89.710)	Prec@5 100.000 (99.886)
+Test: [21/40] Acc 89.833
+epoch: 22
+Train: [0/422]	Time 0.414 (0.414)	Loss 0.1404 (0.1404)	Prec@1 93.750 (93.750)	Prec@5 100.000 (100.000)
+Train: [50/422]	Time 0.030 (0.036)	Loss 0.1306 (0.2349)	Prec@1 96.875 (91.330)	Prec@5 100.000 (99.969)
+Train: [100/422]	Time 0.028 (0.029)	Loss 0.1960 (0.2390)	Prec@1 92.188 (91.000)	Prec@5 100.000 (99.984)
+Train: [150/422]	Time 0.030 (0.030)	Loss 0.2553 (0.2408)	Prec@1 89.062 (90.922)	Prec@5 100.000 (99.984)
+Train: [200/422]	Time 0.031 (0.030)	Loss 0.3632 (0.2421)	Prec@1 87.500 (90.984)	Prec@5 100.000 (99.984)
+Train: [250/422]	Time 0.034 (0.030)	Loss 0.3284 (0.2457)	Prec@1 87.500 (90.922)	Prec@5 100.000 (99.984)
+Train: [300/422]	Time 0.032 (0.031)	Loss 0.2615 (0.2585)	Prec@1 85.938 (90.422)	Prec@5 100.000 (99.922)
+Train: [350/422]	Time 0.028 (0.033)	Loss 0.3645 (0.2635)	Prec@1 84.375 (90.297)	Prec@5 100.000 (99.875)
+Train: [400/422]	Time 0.028 (0.032)	Loss 0.2704 (0.2556)	Prec@1 89.062 (90.422)	Prec@5 100.000 (99.922)
+Test: [0/47]	Time 0.395 (0.395)	Loss 0.2834 (0.2834)	Prec@1 89.062 (89.062)	Prec@5 100.000 (100.000)
+Test: [20/47]	Time 0.008 (0.027)	Loss 0.2624 (0.2571)	Prec@1 92.188 (90.923)	Prec@5 100.000 (100.000)
+Test: [40/47]	Time 0.008 (0.018)	Loss 0.1911 (0.2802)	Prec@1 92.188 (90.549)	Prec@5 100.000 (99.962)
+Test: [22/40] Acc 90.467
+epoch: 23
+Train: [0/422]	Time 0.393 (0.393)	Loss 0.3033 (0.3033)	Prec@1 90.625 (90.625)	Prec@5 100.000 (100.000)
+Train: [50/422]	Time 0.026 (0.036)	Loss 0.2124 (0.2403)	Prec@1 92.188 (90.656)	Prec@5 100.000 (99.969)
+Train: [100/422]	Time 0.029 (0.028)	Loss 0.2369 (0.2373)	Prec@1 93.750 (90.734)	Prec@5 100.000 (99.969)
+Train: [150/422]	Time 0.028 (0.028)	Loss 0.4201 (0.2460)	Prec@1 81.250 (90.438)	Prec@5 100.000 (99.938)
+Train: [200/422]	Time 0.028 (0.029)	Loss 0.2066 (0.2502)	Prec@1 87.500 (90.312)	Prec@5 100.000 (99.922)
+Train: [250/422]	Time 0.028 (0.030)	Loss 0.2818 (0.2423)	Prec@1 90.625 (90.484)	Prec@5 100.000 (99.938)
+Train: [300/422]	Time 0.028 (0.029)	Loss 0.1229 (0.2357)	Prec@1 95.312 (90.781)	Prec@5 100.000 (99.969)
+Train: [350/422]	Time 0.032 (0.030)	Loss 0.2356 (0.2445)	Prec@1 92.188 (90.875)	Prec@5 100.000 (99.969)
+Train: [400/422]	Time 0.029 (0.030)	Loss 0.2307 (0.2394)	Prec@1 89.062 (91.141)	Prec@5 100.000 (99.969)
+Test: [0/47]	Time 0.419 (0.419)	Loss 0.3250 (0.3250)	Prec@1 87.500 (87.500)	Prec@5 100.000 (100.000)
+Test: [20/47]	Time 0.008 (0.028)	Loss 0.2378 (0.2717)	Prec@1 92.188 (90.848)	Prec@5 100.000 (99.926)
+Test: [40/47]	Time 0.008 (0.018)	Loss 0.2002 (0.2904)	Prec@1 90.625 (90.434)	Prec@5 100.000 (99.886)
+Test: [23/40] Acc 90.333
+epoch: 24
+Train: [0/422]	Time 0.414 (0.414)	Loss 0.3423 (0.3423)	Prec@1 87.500 (87.500)	Prec@5 100.000 (100.000)
+Train: [50/422]	Time 0.026 (0.034)	Loss 0.1553 (0.2303)	Prec@1 96.875 (91.667)	Prec@5 100.000 (99.969)
+Train: [100/422]	Time 0.027 (0.027)	Loss 0.2939 (0.2136)	Prec@1 87.500 (92.078)	Prec@5 100.000 (99.984)
+Train: [150/422]	Time 0.028 (0.027)	Loss 0.1486 (0.2151)	Prec@1 95.312 (91.719)	Prec@5 100.000 (99.969)
+Train: [200/422]	Time 0.027 (0.027)	Loss 0.2152 (0.2290)	Prec@1 89.062 (91.078)	Prec@5 100.000 (99.953)
+Train: [250/422]	Time 0.031 (0.028)	Loss 0.1907 (0.2317)	Prec@1 92.188 (90.812)	Prec@5 100.000 (99.969)
+Train: [300/422]	Time 0.028 (0.030)	Loss 0.3546 (0.2325)	Prec@1 84.375 (90.828)	Prec@5 100.000 (99.969)
+Train: [350/422]	Time 0.028 (0.031)	Loss 0.2164 (0.2427)	Prec@1 92.188 (90.547)	Prec@5 100.000 (99.969)
+Train: [400/422]	Time 0.029 (0.030)	Loss 0.2503 (0.2613)	Prec@1 90.625 (89.984)	Prec@5 100.000 (99.969)
+Test: [0/47]	Time 0.391 (0.391)	Loss 0.2477 (0.2477)	Prec@1 87.500 (87.500)	Prec@5 100.000 (100.000)
+Test: [20/47]	Time 0.008 (0.026)	Loss 0.3146 (0.2682)	Prec@1 89.062 (90.402)	Prec@5 100.000 (99.926)
+Test: [40/47]	Time 0.008 (0.017)	Loss 0.2298 (0.2874)	Prec@1 92.188 (90.130)	Prec@5 100.000 (99.924)
+Test: [24/40] Acc 90.267
+epoch: 25
+Train: [0/422]	Time 0.452 (0.452)	Loss 0.1298 (0.1298)	Prec@1 95.312 (95.312)	Prec@5 100.000 (100.000)
+Train: [50/422]	Time 0.035 (0.038)	Loss 0.1781 (0.2113)	Prec@1 92.188 (91.850)	Prec@5 100.000 (100.000)
+Train: [100/422]	Time 0.027 (0.029)	Loss 0.2154 (0.2363)	Prec@1 90.625 (90.891)	Prec@5 100.000 (100.000)
+Train: [150/422]	Time 0.028 (0.030)	Loss 0.3084 (0.2511)	Prec@1 89.062 (90.281)	Prec@5 98.438 (99.969)
+Train: [200/422]	Time 0.030 (0.030)	Loss 0.2048 (0.2374)	Prec@1 92.188 (90.734)	Prec@5 100.000 (99.953)
+Train: [250/422]	Time 0.028 (0.030)	Loss 0.1892 (0.2269)	Prec@1 92.188 (91.438)	Prec@5 100.000 (99.984)
+Train: [300/422]	Time 0.031 (0.030)	Loss 0.1159 (0.2329)	Prec@1 95.312 (91.219)	Prec@5 100.000 (99.984)
+Train: [350/422]	Time 0.030 (0.031)	Loss 0.1225 (0.2421)	Prec@1 95.312 (90.719)	Prec@5 100.000 (99.969)
+Train: [400/422]	Time 0.030 (0.031)	Loss 0.1509 (0.2345)	Prec@1 93.750 (91.031)	Prec@5 100.000 (99.969)
+Test: [0/47]	Time 0.403 (0.403)	Loss 0.1876 (0.1876)	Prec@1 90.625 (90.625)	Prec@5 100.000 (100.000)
+Test: [20/47]	Time 0.008 (0.027)	Loss 0.2942 (0.2582)	Prec@1 90.625 (90.848)	Prec@5 100.000 (99.851)
+Test: [40/47]	Time 0.008 (0.018)	Loss 0.2173 (0.2896)	Prec@1 95.312 (90.434)	Prec@5 100.000 (99.924)
+Test: [25/40] Acc 90.233
+epoch: 26
+Train: [0/422]	Time 0.416 (0.416)	Loss 0.2102 (0.2102)	Prec@1 89.062 (89.062)	Prec@5 100.000 (100.000)
+Train: [50/422]	Time 0.029 (0.037)	Loss 0.3869 (0.1995)	Prec@1 85.938 (92.402)	Prec@5 100.000 (100.000)
+Train: [100/422]	Time 0.032 (0.030)	Loss 0.1530 (0.2139)	Prec@1 93.750 (91.922)	Prec@5 100.000 (99.969)
+Train: [150/422]	Time 0.030 (0.030)	Loss 0.1166 (0.2300)	Prec@1 96.875 (91.406)	Prec@5 100.000 (99.953)
+Train: [200/422]	Time 0.030 (0.030)	Loss 0.2773 (0.2264)	Prec@1 89.062 (91.438)	Prec@5 100.000 (99.938)
+Train: [250/422]	Time 0.028 (0.029)	Loss 0.2645 (0.2207)	Prec@1 89.062 (91.578)	Prec@5 100.000 (99.938)
+Train: [300/422]	Time 0.032 (0.029)	Loss 0.3423 (0.2144)	Prec@1 87.500 (91.859)	Prec@5 100.000 (99.984)
+Train: [350/422]	Time 0.030 (0.030)	Loss 0.2639 (0.2172)	Prec@1 92.188 (91.938)	Prec@5 100.000 (99.953)
+Train: [400/422]	Time 0.032 (0.030)	Loss 0.2502 (0.2324)	Prec@1 85.938 (91.391)	Prec@5 100.000 (99.953)
+Test: [0/47]	Time 0.427 (0.427)	Loss 0.2335 (0.2335)	Prec@1 89.062 (89.062)	Prec@5 100.000 (100.000)
+Test: [20/47]	Time 0.009 (0.029)	Loss 0.2472 (0.2764)	Prec@1 92.188 (90.476)	Prec@5 100.000 (99.926)
+Test: [40/47]	Time 0.008 (0.019)	Loss 0.2733 (0.2994)	Prec@1 89.062 (90.206)	Prec@5 100.000 (99.962)
+Test: [26/40] Acc 90.233
+epoch: 27
+Train: [0/422]	Time 0.420 (0.420)	Loss 0.2675 (0.2675)	Prec@1 87.500 (87.500)	Prec@5 100.000 (100.000)
+Train: [50/422]	Time 0.027 (0.037)	Loss 0.1193 (0.1939)	Prec@1 95.312 (92.555)	Prec@5 100.000 (100.000)
+Train: [100/422]	Time 0.029 (0.029)	Loss 0.2273 (0.1985)	Prec@1 90.625 (92.406)	Prec@5 100.000 (99.984)
+Train: [150/422]	Time 0.027 (0.029)	Loss 0.2414 (0.2152)	Prec@1 92.188 (91.672)	Prec@5 100.000 (99.984)
+Train: [200/422]	Time 0.027 (0.028)	Loss 0.1856 (0.2321)	Prec@1 92.188 (91.000)	Prec@5 100.000 (99.969)
+Train: [250/422]	Time 0.027 (0.027)	Loss 0.2042 (0.2347)	Prec@1 92.188 (90.969)	Prec@5 100.000 (99.969)
+Train: [300/422]	Time 0.027 (0.027)	Loss 0.2802 (0.2267)	Prec@1 87.500 (91.469)	Prec@5 100.000 (99.969)
+Train: [350/422]	Time 0.027 (0.027)	Loss 0.2701 (0.2308)	Prec@1 89.062 (91.516)	Prec@5 100.000 (99.969)
+Train: [400/422]	Time 0.028 (0.027)	Loss 0.1087 (0.2371)	Prec@1 96.875 (91.234)	Prec@5 100.000 (100.000)
+Test: [0/47]	Time 0.407 (0.407)	Loss 0.1713 (0.1713)	Prec@1 93.750 (93.750)	Prec@5 100.000 (100.000)
+Test: [20/47]	Time 0.008 (0.028)	Loss 0.3123 (0.2734)	Prec@1 92.188 (90.625)	Prec@5 100.000 (99.926)
+Test: [40/47]	Time 0.008 (0.018)	Loss 0.1811 (0.2825)	Prec@1 90.625 (90.739)	Prec@5 100.000 (99.962)
+Test: [27/40] Acc 90.600
+epoch: 28
+Train: [0/422]	Time 0.416 (0.416)	Loss 0.1899 (0.1899)	Prec@1 92.188 (92.188)	Prec@5 100.000 (100.000)
+Train: [50/422]	Time 0.027 (0.035)	Loss 0.0936 (0.2040)	Prec@1 96.875 (92.096)	Prec@5 100.000 (99.939)
+Train: [100/422]	Time 0.029 (0.028)	Loss 0.1452 (0.2091)	Prec@1 92.188 (92.094)	Prec@5 100.000 (99.938)
+Train: [150/422]	Time 0.028 (0.029)	Loss 0.3230 (0.2104)	Prec@1 87.500 (92.016)	Prec@5 100.000 (99.953)
+Train: [200/422]	Time 0.030 (0.029)	Loss 0.4930 (0.2126)	Prec@1 85.938 (91.688)	Prec@5 100.000 (99.984)
+Train: [250/422]	Time 0.029 (0.028)	Loss 0.1640 (0.2162)	Prec@1 90.625 (91.797)	Prec@5 100.000 (100.000)
+Train: [300/422]	Time 0.029 (0.029)	Loss 0.3210 (0.2158)	Prec@1 82.812 (92.031)	Prec@5 100.000 (99.969)
+Train: [350/422]	Time 0.031 (0.029)	Loss 0.1469 (0.2239)	Prec@1 98.438 (91.703)	Prec@5 100.000 (99.953)
+Train: [400/422]	Time 0.026 (0.029)	Loss 0.1507 (0.2253)	Prec@1 93.750 (91.406)	Prec@5 100.000 (99.984)
+Test: [0/47]	Time 0.366 (0.366)	Loss 0.2835 (0.2835)	Prec@1 89.062 (89.062)	Prec@5 100.000 (100.000)
+Test: [20/47]	Time 0.008 (0.025)	Loss 0.3779 (0.2686)	Prec@1 84.375 (90.476)	Prec@5 100.000 (99.777)
+Test: [40/47]	Time 0.008 (0.017)	Loss 0.2382 (0.2978)	Prec@1 87.500 (90.053)	Prec@5 100.000 (99.848)
+Test: [28/40] Acc 90.133
+epoch: 29
+Train: [0/422]	Time 0.422 (0.422)	Loss 0.1688 (0.1688)	Prec@1 92.188 (92.188)	Prec@5 100.000 (100.000)
+Train: [50/422]	Time 0.028 (0.037)	Loss 0.2005 (0.2015)	Prec@1 90.625 (91.513)	Prec@5 100.000 (100.000)
+Train: [100/422]	Time 0.030 (0.030)	Loss 0.1595 (0.2045)	Prec@1 95.312 (92.047)	Prec@5 100.000 (100.000)
+Train: [150/422]	Time 0.028 (0.031)	Loss 0.1820 (0.1961)	Prec@1 92.188 (92.938)	Prec@5 100.000 (99.984)
+Train: [200/422]	Time 0.038 (0.031)	Loss 0.1966 (0.1987)	Prec@1 93.750 (92.594)	Prec@5 100.000 (99.984)
+Train: [250/422]	Time 0.029 (0.031)	Loss 0.2456 (0.2174)	Prec@1 87.500 (91.750)	Prec@5 100.000 (100.000)
+Train: [300/422]	Time 0.039 (0.032)	Loss 0.0937 (0.2223)	Prec@1 98.438 (91.891)	Prec@5 100.000 (99.953)
+Train: [350/422]	Time 0.030 (0.030)	Loss 0.1368 (0.2239)	Prec@1 93.750 (91.797)	Prec@5 100.000 (99.938)
+Train: [400/422]	Time 0.029 (0.029)	Loss 0.0984 (0.2136)	Prec@1 98.438 (91.828)	Prec@5 100.000 (99.969)
+Test: [0/47]	Time 0.396 (0.396)	Loss 0.1748 (0.1748)	Prec@1 95.312 (95.312)	Prec@5 100.000 (100.000)
+Test: [20/47]	Time 0.008 (0.027)	Loss 0.3593 (0.2536)	Prec@1 87.500 (91.964)	Prec@5 100.000 (99.851)
+Test: [40/47]	Time 0.008 (0.018)	Loss 0.2643 (0.2793)	Prec@1 89.062 (91.044)	Prec@5 100.000 (99.924)
+Test: [29/40] Acc 90.967
+epoch: 30
+Train: [0/422]	Time 0.407 (0.407)	Loss 0.1514 (0.1514)	Prec@1 96.875 (96.875)	Prec@5 100.000 (100.000)
+Train: [50/422]	Time 0.027 (0.036)	Loss 0.1751 (0.1915)	Prec@1 95.312 (92.800)	Prec@5 100.000 (100.000)
+Train: [100/422]	Time 0.029 (0.029)	Loss 0.2629 (0.2006)	Prec@1 89.062 (92.656)	Prec@5 100.000 (99.984)
+Train: [150/422]	Time 0.028 (0.030)	Loss 0.1670 (0.2058)	Prec@1 90.625 (92.281)	Prec@5 100.000 (99.969)
+Train: [200/422]	Time 0.029 (0.031)	Loss 0.3189 (0.2101)	Prec@1 81.250 (92.094)	Prec@5 100.000 (99.984)
+Train: [250/422]	Time 0.028 (0.030)	Loss 0.1722 (0.2088)	Prec@1 90.625 (92.375)	Prec@5 100.000 (99.969)
+Train: [300/422]	Time 0.028 (0.029)	Loss 0.1305 (0.2032)	Prec@1 92.188 (92.375)	Prec@5 100.000 (99.938)
+Train: [350/422]	Time 0.029 (0.029)	Loss 0.2700 (0.2074)	Prec@1 85.938 (92.109)	Prec@5 100.000 (99.969)
+Train: [400/422]	Time 0.029 (0.031)	Loss 0.2125 (0.2101)	Prec@1 89.062 (91.859)	Prec@5 100.000 (99.984)
+Test: [0/47]	Time 0.474 (0.474)	Loss 0.2584 (0.2584)	Prec@1 93.750 (93.750)	Prec@5 100.000 (100.000)
+Test: [20/47]	Time 0.008 (0.031)	Loss 0.3715 (0.2458)	Prec@1 90.625 (92.188)	Prec@5 100.000 (100.000)
+Test: [40/47]	Time 0.008 (0.020)	Loss 0.2126 (0.2841)	Prec@1 92.188 (91.502)	Prec@5 100.000 (100.000)
+Test: [30/40] Acc 91.400
+epoch: 31
+Train: [0/422]	Time 0.429 (0.429)	Loss 0.0916 (0.0916)	Prec@1 96.875 (96.875)	Prec@5 100.000 (100.000)
+Train: [50/422]	Time 0.029 (0.037)	Loss 0.2513 (0.1768)	Prec@1 87.500 (93.505)	Prec@5 100.000 (100.000)
+Train: [100/422]	Time 0.028 (0.030)	Loss 0.1542 (0.1879)	Prec@1 90.625 (93.062)	Prec@5 100.000 (100.000)
+Train: [150/422]	Time 0.028 (0.030)	Loss 0.1263 (0.1953)	Prec@1 95.312 (92.531)	Prec@5 100.000 (100.000)
+Train: [200/422]	Time 0.028 (0.030)	Loss 0.1583 (0.2045)	Prec@1 90.625 (92.219)	Prec@5 100.000 (99.984)
+Train: [250/422]	Time 0.029 (0.030)	Loss 0.1444 (0.2158)	Prec@1 93.750 (92.109)	Prec@5 100.000 (99.984)
+Train: [300/422]	Time 0.029 (0.029)	Loss 0.1888 (0.2017)	Prec@1 95.312 (92.406)	Prec@5 100.000 (100.000)
+Train: [350/422]	Time 0.028 (0.030)	Loss 0.2347 (0.1981)	Prec@1 89.062 (92.203)	Prec@5 100.000 (99.984)
+Train: [400/422]	Time 0.028 (0.030)	Loss 0.1603 (0.2092)	Prec@1 95.312 (91.953)	Prec@5 100.000 (99.969)
+Test: [0/47]	Time 0.389 (0.389)	Loss 0.2347 (0.2347)	Prec@1 89.062 (89.062)	Prec@5 100.000 (100.000)
+Test: [20/47]	Time 0.008 (0.026)	Loss 0.3252 (0.2597)	Prec@1 90.625 (91.220)	Prec@5 100.000 (99.851)
+Test: [40/47]	Time 0.008 (0.017)	Loss 0.1712 (0.2794)	Prec@1 92.188 (90.854)	Prec@5 100.000 (99.924)
+Test: [31/40] Acc 90.767
+epoch: 32
+Train: [0/422]	Time 0.403 (0.403)	Loss 0.1267 (0.1267)	Prec@1 95.312 (95.312)	Prec@5 100.000 (100.000)
+Train: [50/422]	Time 0.027 (0.035)	Loss 0.2083 (0.1716)	Prec@1 93.750 (93.321)	Prec@5 100.000 (99.969)
+Train: [100/422]	Time 0.027 (0.027)	Loss 0.0598 (0.1810)	Prec@1 98.438 (92.859)	Prec@5 100.000 (99.984)
+Train: [150/422]	Time 0.028 (0.028)	Loss 0.2033 (0.2046)	Prec@1 93.750 (92.156)	Prec@5 100.000 (99.984)
+Train: [200/422]	Time 0.029 (0.029)	Loss 0.1821 (0.2124)	Prec@1 95.312 (91.969)	Prec@5 100.000 (99.969)
+Train: [250/422]	Time 0.030 (0.029)	Loss 0.1441 (0.2046)	Prec@1 95.312 (92.078)	Prec@5 100.000 (99.984)
+Train: [300/422]	Time 0.030 (0.028)	Loss 0.2672 (0.2013)	Prec@1 92.188 (92.188)	Prec@5 100.000 (100.000)
+Train: [350/422]	Time 0.027 (0.028)	Loss 0.2555 (0.2045)	Prec@1 87.500 (91.859)	Prec@5 100.000 (99.969)
+Train: [400/422]	Time 0.029 (0.029)	Loss 0.1382 (0.2003)	Prec@1 93.750 (92.094)	Prec@5 100.000 (99.953)
+Test: [0/47]	Time 0.404 (0.404)	Loss 0.2333 (0.2333)	Prec@1 89.062 (89.062)	Prec@5 100.000 (100.000)
+Test: [20/47]	Time 0.008 (0.027)	Loss 0.2676 (0.2616)	Prec@1 92.188 (91.220)	Prec@5 100.000 (99.926)
+Test: [40/47]	Time 0.008 (0.018)	Loss 0.1156 (0.2819)	Prec@1 95.312 (90.854)	Prec@5 100.000 (99.962)
+Test: [32/40] Acc 90.667
+epoch: 33
+Train: [0/422]	Time 0.432 (0.432)	Loss 0.1760 (0.1760)	Prec@1 93.750 (93.750)	Prec@5 100.000 (100.000)
+Train: [50/422]	Time 0.031 (0.036)	Loss 0.2733 (0.1907)	Prec@1 90.625 (92.371)	Prec@5 100.000 (99.969)
+Train: [100/422]	Time 0.028 (0.028)	Loss 0.1506 (0.1933)	Prec@1 95.312 (92.469)	Prec@5 100.000 (99.953)
+Train: [150/422]	Time 0.028 (0.029)	Loss 0.3124 (0.1988)	Prec@1 90.625 (92.453)	Prec@5 100.000 (99.953)
+Train: [200/422]	Time 0.028 (0.028)	Loss 0.3189 (0.1961)	Prec@1 85.938 (92.344)	Prec@5 100.000 (99.984)
+Train: [250/422]	Time 0.028 (0.028)	Loss 0.1286 (0.1888)	Prec@1 93.750 (92.672)	Prec@5 100.000 (100.000)
+Train: [300/422]	Time 0.029 (0.029)	Loss 0.1047 (0.1959)	Prec@1 96.875 (92.750)	Prec@5 100.000 (99.984)
+Train: [350/422]	Time 0.029 (0.030)	Loss 0.2052 (0.1996)	Prec@1 90.625 (92.422)	Prec@5 100.000 (99.969)
+Train: [400/422]	Time 0.031 (0.030)	Loss 0.1040 (0.1948)	Prec@1 96.875 (92.531)	Prec@5 100.000 (99.969)
+Test: [0/47]	Time 0.420 (0.420)	Loss 0.1725 (0.1725)	Prec@1 92.188 (92.188)	Prec@5 100.000 (100.000)
+Test: [20/47]	Time 0.008 (0.028)	Loss 0.3278 (0.2511)	Prec@1 92.188 (91.964)	Prec@5 100.000 (99.926)
+Test: [40/47]	Time 0.008 (0.018)	Loss 0.2040 (0.2775)	Prec@1 90.625 (91.044)	Prec@5 100.000 (99.924)
+Test: [33/40] Acc 91.067
+epoch: 34
+Train: [0/422]	Time 0.452 (0.452)	Loss 0.1944 (0.1944)	Prec@1 89.062 (89.062)	Prec@5 100.000 (100.000)
+Train: [50/422]	Time 0.030 (0.037)	Loss 0.1258 (0.1720)	Prec@1 95.312 (93.413)	Prec@5 100.000 (100.000)
+Train: [100/422]	Time 0.028 (0.029)	Loss 0.1010 (0.1833)	Prec@1 95.312 (92.875)	Prec@5 100.000 (99.984)
+Train: [150/422]	Time 0.028 (0.029)	Loss 0.2000 (0.1934)	Prec@1 90.625 (92.422)	Prec@5 100.000 (99.984)
+Train: [200/422]	Time 0.028 (0.028)	Loss 0.0634 (0.1894)	Prec@1 98.438 (92.594)	Prec@5 100.000 (100.000)
+Train: [250/422]	Time 0.029 (0.029)	Loss 0.3044 (0.1775)	Prec@1 87.500 (93.047)	Prec@5 100.000 (100.000)
+Train: [300/422]	Time 0.028 (0.029)	Loss 0.2100 (0.1825)	Prec@1 95.312 (93.141)	Prec@5 100.000 (99.984)
+Train: [350/422]	Time 0.028 (0.029)	Loss 0.1688 (0.1931)	Prec@1 95.312 (92.766)	Prec@5 100.000 (99.984)
+Train: [400/422]	Time 0.027 (0.029)	Loss 0.1424 (0.1914)	Prec@1 92.188 (92.781)	Prec@5 100.000 (99.984)
+Test: [0/47]	Time 0.366 (0.366)	Loss 0.2614 (0.2614)	Prec@1 85.938 (85.938)	Prec@5 100.000 (100.000)
+Test: [20/47]	Time 0.008 (0.025)	Loss 0.3285 (0.2494)	Prec@1 92.188 (92.188)	Prec@5 100.000 (99.777)
+Test: [40/47]	Time 0.008 (0.017)	Loss 0.1544 (0.2755)	Prec@1 93.750 (91.502)	Prec@5 100.000 (99.809)
+Test: [34/40] Acc 91.200
+epoch: 35
+Train: [0/422]	Time 0.431 (0.431)	Loss 0.1425 (0.1425)	Prec@1 93.750 (93.750)	Prec@5 100.000 (100.000)
+Train: [50/422]	Time 0.026 (0.036)	Loss 0.2375 (0.1868)	Prec@1 89.062 (92.953)	Prec@5 100.000 (100.000)
+Train: [100/422]	Time 0.034 (0.028)	Loss 0.1112 (0.1849)	Prec@1 96.875 (93.031)	Prec@5 100.000 (100.000)
+Train: [150/422]	Time 0.031 (0.029)	Loss 0.2892 (0.1864)	Prec@1 92.188 (93.109)	Prec@5 100.000 (99.984)
+Train: [200/422]	Time 0.028 (0.030)	Loss 0.1792 (0.1914)	Prec@1 95.312 (92.578)	Prec@5 100.000 (99.984)
+Train: [250/422]	Time 0.027 (0.029)	Loss 0.2140 (0.1986)	Prec@1 92.188 (92.156)	Prec@5 100.000 (100.000)
+Train: [300/422]	Time 0.031 (0.029)	Loss 0.1599 (0.1896)	Prec@1 93.750 (92.641)	Prec@5 100.000 (99.984)
+Train: [350/422]	Time 0.027 (0.029)	Loss 0.1516 (0.1770)	Prec@1 95.312 (93.094)	Prec@5 100.000 (99.969)
+Train: [400/422]	Time 0.029 (0.029)	Loss 0.1932 (0.1878)	Prec@1 92.188 (93.031)	Prec@5 100.000 (99.969)
+Test: [0/47]	Time 0.420 (0.420)	Loss 0.1958 (0.1958)	Prec@1 89.062 (89.062)	Prec@5 100.000 (100.000)
+Test: [20/47]	Time 0.008 (0.028)	Loss 0.2967 (0.2417)	Prec@1 93.750 (92.039)	Prec@5 100.000 (99.851)
+Test: [40/47]	Time 0.008 (0.018)	Loss 0.1608 (0.2722)	Prec@1 95.312 (91.883)	Prec@5 100.000 (99.848)
+Test: [35/40] Acc 91.533
+epoch: 36
+Train: [0/422]	Time 0.419 (0.419)	Loss 0.1131 (0.1131)	Prec@1 95.312 (95.312)	Prec@5 100.000 (100.000)
+Train: [50/422]	Time 0.031 (0.038)	Loss 0.1650 (0.1784)	Prec@1 93.750 (93.444)	Prec@5 100.000 (100.000)
+Train: [100/422]	Time 0.029 (0.030)	Loss 0.4012 (0.1851)	Prec@1 81.250 (93.094)	Prec@5 100.000 (100.000)
+Train: [150/422]	Time 0.030 (0.030)	Loss 0.3985 (0.1902)	Prec@1 87.500 (92.797)	Prec@5 100.000 (100.000)
+Train: [200/422]	Time 0.027 (0.029)	Loss 0.1573 (0.1867)	Prec@1 92.188 (92.906)	Prec@5 100.000 (99.984)
+Train: [250/422]	Time 0.029 (0.028)	Loss 0.1464 (0.1726)	Prec@1 93.750 (93.234)	Prec@5 100.000 (99.984)
+Train: [300/422]	Time 0.030 (0.029)	Loss 0.1556 (0.1725)	Prec@1 93.750 (93.188)	Prec@5 100.000 (100.000)
+Train: [350/422]	Time 0.029 (0.029)	Loss 0.1447 (0.1886)	Prec@1 93.750 (92.688)	Prec@5 100.000 (99.969)
+Train: [400/422]	Time 0.029 (0.028)	Loss 0.1287 (0.1878)	Prec@1 96.875 (92.781)	Prec@5 100.000 (99.969)
+Test: [0/47]	Time 0.409 (0.409)	Loss 0.1903 (0.1903)	Prec@1 92.188 (92.188)	Prec@5 100.000 (100.000)
+Test: [20/47]	Time 0.008 (0.027)	Loss 0.3482 (0.2711)	Prec@1 89.062 (91.220)	Prec@5 100.000 (99.926)
+Test: [40/47]	Time 0.008 (0.018)	Loss 0.1932 (0.2939)	Prec@1 93.750 (91.159)	Prec@5 100.000 (99.962)
+Test: [36/40] Acc 91.000
+epoch: 37
+Train: [0/422]	Time 0.412 (0.412)	Loss 0.0743 (0.0743)	Prec@1 96.875 (96.875)	Prec@5 100.000 (100.000)
+Train: [50/422]	Time 0.028 (0.036)	Loss 0.0969 (0.1760)	Prec@1 96.875 (93.842)	Prec@5 100.000 (99.969)
+Train: [100/422]	Time 0.037 (0.030)	Loss 0.2685 (0.1772)	Prec@1 87.500 (93.500)	Prec@5 100.000 (99.984)
+Train: [150/422]	Time 0.027 (0.032)	Loss 0.0930 (0.1703)	Prec@1 95.312 (93.594)	Prec@5 100.000 (100.000)
+Train: [200/422]	Time 0.030 (0.030)	Loss 0.1078 (0.1745)	Prec@1 96.875 (93.422)	Prec@5 100.000 (99.984)
+Train: [250/422]	Time 0.027 (0.028)	Loss 0.0483 (0.1736)	Prec@1 98.438 (93.172)	Prec@5 100.000 (99.984)
+Train: [300/422]	Time 0.033 (0.029)	Loss 0.0761 (0.1762)	Prec@1 95.312 (93.219)	Prec@5 100.000 (100.000)
+Train: [350/422]	Time 0.028 (0.029)	Loss 0.2982 (0.1913)	Prec@1 85.938 (92.672)	Prec@5 100.000 (99.984)
+Train: [400/422]	Time 0.028 (0.029)	Loss 0.1711 (0.1888)	Prec@1 92.188 (92.656)	Prec@5 100.000 (99.984)
+Test: [0/47]	Time 0.438 (0.438)	Loss 0.2369 (0.2369)	Prec@1 90.625 (90.625)	Prec@5 100.000 (100.000)
+Test: [20/47]	Time 0.008 (0.029)	Loss 0.2750 (0.2631)	Prec@1 90.625 (91.146)	Prec@5 100.000 (99.851)
+Test: [40/47]	Time 0.008 (0.019)	Loss 0.2500 (0.2907)	Prec@1 87.500 (91.235)	Prec@5 100.000 (99.886)
+Test: [37/40] Acc 91.367
+epoch: 38
+Train: [0/422]	Time 0.409 (0.409)	Loss 0.0883 (0.0883)	Prec@1 98.438 (98.438)	Prec@5 100.000 (100.000)
+Train: [50/422]	Time 0.026 (0.034)	Loss 0.2393 (0.1597)	Prec@1 89.062 (93.536)	Prec@5 100.000 (100.000)
+Train: [100/422]	Time 0.028 (0.027)	Loss 0.0541 (0.1681)	Prec@1 98.438 (93.547)	Prec@5 100.000 (99.984)
+Train: [150/422]	Time 0.029 (0.028)	Loss 0.0767 (0.1694)	Prec@1 100.000 (93.984)	Prec@5 100.000 (99.984)
+Train: [200/422]	Time 0.028 (0.029)	Loss 0.3003 (0.1653)	Prec@1 89.062 (93.828)	Prec@5 100.000 (99.969)
+Train: [250/422]	Time 0.028 (0.029)	Loss 0.2576 (0.1780)	Prec@1 87.500 (93.156)	Prec@5 100.000 (99.969)
+Train: [300/422]	Time 0.030 (0.029)	Loss 0.1321 (0.1859)	Prec@1 93.750 (92.891)	Prec@5 100.000 (100.000)
+Train: [350/422]	Time 0.029 (0.029)	Loss 0.1038 (0.1732)	Prec@1 95.312 (93.312)	Prec@5 100.000 (99.984)
+Train: [400/422]	Time 0.030 (0.029)	Loss 0.1939 (0.1789)	Prec@1 93.750 (93.344)	Prec@5 100.000 (99.984)
+Test: [0/47]	Time 0.458 (0.458)	Loss 0.2139 (0.2139)	Prec@1 95.312 (95.312)	Prec@5 100.000 (100.000)
+Test: [20/47]	Time 0.009 (0.030)	Loss 0.2846 (0.2839)	Prec@1 90.625 (90.997)	Prec@5 100.000 (99.851)
+Test: [40/47]	Time 0.008 (0.020)	Loss 0.2437 (0.3059)	Prec@1 92.188 (90.663)	Prec@5 100.000 (99.924)
+Test: [38/40] Acc 90.567
+epoch: 39
+Train: [0/422]	Time 0.443 (0.443)	Loss 0.1350 (0.1350)	Prec@1 93.750 (93.750)	Prec@5 100.000 (100.000)
+Train: [50/422]	Time 0.028 (0.036)	Loss 0.2107 (0.1747)	Prec@1 90.625 (93.168)	Prec@5 100.000 (100.000)
+Train: [100/422]	Time 0.031 (0.029)	Loss 0.3114 (0.1636)	Prec@1 90.625 (93.734)	Prec@5 100.000 (100.000)
+Train: [150/422]	Time 0.029 (0.029)	Loss 0.0784 (0.1621)	Prec@1 98.438 (94.094)	Prec@5 100.000 (99.984)
+Train: [200/422]	Time 0.029 (0.029)	Loss 0.1101 (0.1713)	Prec@1 96.875 (93.672)	Prec@5 100.000 (99.984)
+Train: [250/422]	Time 0.028 (0.029)	Loss 0.2036 (0.1723)	Prec@1 93.750 (93.625)	Prec@5 100.000 (100.000)
+Train: [300/422]	Time 0.029 (0.029)	Loss 0.1616 (0.1706)	Prec@1 92.188 (93.812)	Prec@5 100.000 (100.000)
+Train: [350/422]	Time 0.028 (0.029)	Loss 0.1731 (0.1818)	Prec@1 93.750 (92.969)	Prec@5 100.000 (100.000)
+Train: [400/422]	Time 0.029 (0.029)	Loss 0.0958 (0.1791)	Prec@1 95.312 (92.953)	Prec@5 100.000 (100.000)
+Test: [0/47]	Time 0.416 (0.416)	Loss 0.2117 (0.2117)	Prec@1 90.625 (90.625)	Prec@5 100.000 (100.000)
+Test: [20/47]	Time 0.008 (0.028)	Loss 0.3019 (0.2585)	Prec@1 90.625 (91.518)	Prec@5 100.000 (100.000)
+Test: [40/47]	Time 0.008 (0.018)	Loss 0.1599 (0.2937)	Prec@1 93.750 (91.044)	Prec@5 100.000 (99.924)
+Test: [39/40] Acc 91.067
+best ACC: 91.53333333333333
